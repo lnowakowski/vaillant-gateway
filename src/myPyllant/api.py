@@ -4,6 +4,8 @@ import datetime
 import json
 import logging
 import re
+import os
+import pickle
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 from html import unescape
@@ -79,7 +81,8 @@ def get_system_id(system: System | str) -> str:
 
 
 def get_api_base(control_identifier: ControlIdentifier | str | None = None) -> str:
-    key = str(control_identifier) if control_identifier else DEFAULT_CONTROL_IDENTIFIER
+    key = str(
+        control_identifier) if control_identifier else DEFAULT_CONTROL_IDENTIFIER
     return API_URL_BASE[key]
 
 
@@ -110,7 +113,8 @@ class MyPyllantAPI:
         if brand in COUNTRIES:
             # Only need to valid country, if the brand exists as a key in COUNTRIES
             if not country:
-                raise RealmInvalid(f"{BRANDS[brand]} requires country to be passed")
+                raise RealmInvalid(
+                    f"{BRANDS[brand]} requires country to be passed")
             elif country not in COUNTRIES[brand].keys():
                 raise RealmInvalid(
                     f"Invalid country, {BRANDS[brand]} only supports {', '.join(COUNTRIES[brand].keys())}"
@@ -136,10 +140,30 @@ class MyPyllantAPI:
             await self.aiohttp_session.close()
 
     async def login(self):
-        code, code_verifier = await self.get_code()
-        self.oauth_session = await self.get_token(code, code_verifier)
-        logger.debug("Got session %s", self.oauth_session)
-        self.set_session_expires()
+        try:
+            with open('.vaillant_auth.pickle', 'rb') as o:
+                self.oauth_session = pickle.load(o)
+                logger.debug(f'Restored OAuth session')
+                self.set_session_expires()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning('Failed to load OAuth session from file: %s', e)
+
+        if not self.oauth_session_expires or self.oauth_session_expires <= datetime.datetime.now(datetime.timezone.utc):
+            code, code_verifier = await self.get_code()
+            self.oauth_session = await self.get_token(code, code_verifier)
+            logger.debug("Got session %s", self.oauth_session)
+            self.set_session_expires()
+
+            try:
+                with open('.vaillant_auth.pickle', 'wb') as o:
+                    pickle.dump(self.oauth_session, o)
+                    logger.debug('Saved OAuth session')
+            except Exception as e:
+                logger.warning('Failed to save OAuth session to file: %s', e)
+        else:
+            logger.debug('Restored OAuth session still valid')
 
     async def get_code(self):
         """
@@ -163,7 +187,8 @@ class MyPyllantAPI:
         code = None
         try:
             async with self.aiohttp_session.get(
-                AUTHENTICATE_URL.format(realm=get_realm(self.brand, self.country))
+                AUTHENTICATE_URL.format(
+                    realm=get_realm(self.brand, self.country))
                 + "?"
                 + urlencode(auth_querystring),
                 allow_redirects=False,
@@ -303,14 +328,15 @@ class MyPyllantAPI:
                 timezone = await self.get_time_zone(home_json["system_id"])
                 yield Home.from_api(timezone=timezone, **home_json)
 
-    async def get_systems(
+    async def get_system(
         self,
+        system_id: str,
         include_connection_status: bool = False,
         include_diagnostic_trouble_codes: bool = False,
         include_rts: bool = False,
         include_mpc: bool = False,
         include_ambisense_rooms: bool = False,
-    ) -> AsyncIterator[System]:
+    ) -> System:
         """
         Returns an async generator of systems under control of the user
 
@@ -322,59 +348,54 @@ class MyPyllantAPI:
             include_ambisense_rooms: Fetches Ambisense room data
 
         Returns:
-            An Async Iterator with all the `System` objects
+            `System` objects
 
         Examples:
             >>> async for system in MyPyllantAPI(**kwargs).get_systems():
             >>>    print(system.water_pressure)
         """
-        homes = self.get_homes()
-        async for home in homes:
-            control_identifier = await self.get_control_identifier(home.system_id)
-            system_url = await self.get_system_api_base(home.system_id)
-            current_system_url = (
-                f"{await self.get_api_base()}/emf/v2/{home.system_id}/currentSystem"
-            )
+        # homes = self.get_homes()
+        # async for home in homes:
+        control_identifier = await self.get_control_identifier(system_id)
+        system_url = await self.get_system_api_base(system_id)
+        current_system_url = (
+            f"{await self.get_api_base()}/emf/v2/{system_id}/currentSystem"
+        )
 
-            async with self.aiohttp_session.get(
-                system_url, headers=self.get_authorized_headers()
-            ) as system_resp:
-                system_raw = await system_resp.text()
-                if control_identifier.is_vrc700:
-                    system_raw = system_raw.replace("domesticHotWater", "dhw")
-                    system_raw = system_raw.replace("DomesticHotWater", "Dhw")
-                system_json = dict_to_snake_case(json.loads(system_raw))
+        async with self.aiohttp_session.get(
+            system_url, headers=self.get_authorized_headers()
+        ) as system_resp:
+            system_raw = await system_resp.text()
+            if control_identifier.is_vrc700:
+                system_raw = system_raw.replace("domesticHotWater", "dhw")
+                system_raw = system_raw.replace("DomesticHotWater", "Dhw")
+            system_json = dict_to_snake_case(json.loads(system_raw))
 
-            async with self.aiohttp_session.get(
-                current_system_url, headers=self.get_authorized_headers()
-            ) as current_system_resp:
-                current_system_json = await current_system_resp.json()
+        async with self.aiohttp_session.get(
+            current_system_url, headers=self.get_authorized_headers()
+        ) as current_system_resp:
+            current_system_json = await current_system_resp.json()
 
-            ambisense_capability = await self.get_ambisense_capability(home.system_id)
+        # ambisense_capability = await self.get_ambisense_capability(system_id)
+        ambisense_capability = True
 
-            system = System.from_api(
-                brand=self.brand,
-                home=home,
-                timezone=home.timezone,
-                control_identifier=control_identifier,
-                connected=await self.get_connection_status(home.system_id)
-                if include_connection_status
-                else None,
-                diagnostic_trouble_codes=await self.get_diagnostic_trouble_codes(
-                    home.system_id
-                )
-                if include_diagnostic_trouble_codes
-                else None,
-                rts=await self.get_rts(home.system_id) if include_rts else {},
-                mpc=await self.get_mpc(home.system_id) if include_mpc else {},
-                current_system=dict_to_snake_case(current_system_json),
-                ambisense_capability=ambisense_capability,
-                ambisense_rooms=await self.get_ambisense_rooms(home.system_id)
-                if include_ambisense_rooms and ambisense_capability
-                else [],
-                **dict_to_snake_case(system_json),
-            )
-            yield system
+        system = System.from_api(
+            id=system_id,
+            brand=self.brand,
+            # home=home,
+            timezone=self.get_time_zone(),
+            control_identifier=control_identifier,
+            connected=None,
+            diagnostic_trouble_codes=None,
+            rts={},
+            mpc={},
+            current_system=dict_to_snake_case(current_system_json),
+            ambisense_capability=ambisense_capability,
+            ambisense_rooms=[],
+            **dict_to_snake_case(system_json),
+        )
+        # yield system
+        return system
 
     async def get_data_by_device(
         self,
@@ -401,7 +422,8 @@ class MyPyllantAPI:
                 )
             data_to = data_to or data.data_to
             if not data_to:
-                raise ValueError("No data_to set, and no data_to found in device data")
+                raise ValueError(
+                    "No data_to set, and no data_to found in device data")
             start_date = datetime_format(data_from)
             end_date = datetime_format(data_to)
             querystring = {
@@ -529,15 +551,20 @@ class MyPyllantAPI:
             }
             if duration_hours:
                 payload["duration"] = duration_hours
-            await self.aiohttp_session.patch(
+            response = await self.aiohttp_session.patch(
                 url,
                 json=payload,
                 headers=self.get_authorized_headers(),
             )
-            zone.desired_room_temperature_setpoint = temperature
+
+            logger.debug('Zone veto update status: %d', response.status)
+
+            if response.status == 202:
+                zone.desired_room_temperature_setpoint = temperature
+
             return zone
         else:
-            await self.aiohttp_session.post(
+            response = await self.aiohttp_session.post(
                 url,
                 json={
                     "desiredRoomTemperatureSetpoint": temperature,
@@ -545,11 +572,17 @@ class MyPyllantAPI:
                 },
                 headers=self.get_authorized_headers(),
             )
-            zone.desired_room_temperature_setpoint = temperature
-            zone.quick_veto_start_date_time = datetime.datetime.now(zone.timezone)
-            zone.quick_veto_end_date_time = datetime.datetime.now(
-                zone.timezone
-            ) + datetime.timedelta(hours=(duration_hours or default_duration))
+
+            logger.debug('Zone veto change status: %d', response.status)
+
+            if response.status == 202:
+                zone.desired_room_temperature_setpoint = temperature
+                zone.quick_veto_start_date_time = datetime.datetime.now(
+                    zone.timezone)
+                zone.quick_veto_end_date_time = datetime.datetime.now(
+                    zone.timezone
+                ) + datetime.timedelta(hours=(duration_hours or default_duration))
+
             return zone
 
     async def quick_veto_zone_duration(
@@ -669,10 +702,15 @@ class MyPyllantAPI:
         else:
             url = f"{await self.get_system_api_base(zone.system_id)}/zones/{zone.index}/quick-veto"
 
-        await self.aiohttp_session.delete(url, headers=self.get_authorized_headers())
-        zone.quick_veto_start_date_time = None
-        zone.quick_veto_end_date_time = None
-        zone.current_special_function = ZoneCurrentSpecialFunction.NONE
+        response = await self.aiohttp_session.delete(url, headers=self.get_authorized_headers())
+
+        logger.debug('Zone veto cancel status: %d', response.status)
+
+        if response.status == 202:
+            zone.quick_veto_start_date_time = None
+            zone.quick_veto_end_date_time = None
+            zone.current_special_function = ZoneCurrentSpecialFunction.NONE
+
         return zone
 
     async def set_set_back_temperature(
@@ -743,7 +781,8 @@ class MyPyllantAPI:
 
         # zone.heating.time_program_heating = time_program or zone.cooling.time_program_cooling = time_program
         setattr(
-            getattr(zone, setback_type), f"time_program_{setback_type}", time_program
+            getattr(
+                zone, setback_type), f"time_program_{setback_type}", time_program
         )
         return zone
 
@@ -783,7 +822,8 @@ class MyPyllantAPI:
         else:
             url = f"{await self.get_system_api_base(system.id)}/away-mode"
             if setpoint is not None:
-                raise ValueError("setpoint is not supported on this controller")
+                raise ValueError(
+                    "setpoint is not supported on this controller")
 
         await self.aiohttp_session.post(
             url, json=data, headers=self.get_authorized_headers()
@@ -831,16 +871,20 @@ class MyPyllantAPI:
             temperature: The desired temperature, only whole numbers are supported by the API, floats get rounded
         """
         if isinstance(temperature, float):
-            logger.warning("Domestic hot water can only be set to whole numbers")
+            logger.warning(
+                "Domestic hot water can only be set to whole numbers")
             temperature = int(round(temperature, 0))
         url = (
             f"{await self.get_system_api_base(domestic_hot_water.system_id)}"
             f"/domestic-hot-water/{domestic_hot_water.index}/temperature"
         )
-        await self.aiohttp_session.patch(
+        response = await self.aiohttp_session.patch(
             url, json={"setpoint": temperature}, headers=self.get_authorized_headers()
         )
-        domestic_hot_water.tapping_setpoint = temperature
+
+        if response.status == 202:
+            domestic_hot_water.tapping_setpoint = temperature
+
         return domestic_hot_water
 
     async def boost_domestic_hot_water(self, domestic_hot_water: DomesticHotWater):
@@ -893,18 +937,22 @@ class MyPyllantAPI:
             f"{await self.get_system_api_base(domestic_hot_water.system_id)}/domestic-hot-water/"
             f"{domestic_hot_water.index}/operation-mode"
         )
-        await self.aiohttp_session.patch(
+        reponse = await self.aiohttp_session.patch(
             url,
             json={"operationMode": str(mode)},
             headers=self.get_authorized_headers(),
         )
 
-        if isinstance(mode, str):
-            if domestic_hot_water.control_identifier.is_vrc700:
-                mode = DHWOperationModeVRC700(mode)
-            else:
-                mode = DHWOperationMode(mode)
-        domestic_hot_water.operation_mode_dhw = mode
+        logger.debug('DHW mode change status: %d', reponse.status)
+
+        if reponse.status == 202:
+            if isinstance(mode, str):
+                if domestic_hot_water.control_identifier.is_vrc700:
+                    mode = DHWOperationModeVRC700(mode)
+                else:
+                    mode = DHWOperationMode(mode)
+            domestic_hot_water.operation_mode_dhw = mode
+
         return domestic_hot_water
 
     async def set_domestic_hot_water_time_program(
@@ -1050,40 +1098,59 @@ class MyPyllantAPI:
                 f"{await self.get_api_base()}/systems/"
                 f"{system_id}/meta-info/control-identifier"
             )
-            response = await self.aiohttp_session.get(
-                url,
-                headers=self.get_authorized_headers(),
-            )
             try:
+                response = await self.aiohttp_session.get(
+                    url,
+                    headers=self.get_authorized_headers(),
+                )
                 control_identifier = (await response.json())["controlIdentifier"]
                 self.control_identifiers[system_id] = control_identifier
             except KeyError:
                 logger.warning("Couldn't get control identifier")
                 control_identifier = DEFAULT_CONTROL_IDENTIFIER
+            except ClientResponseError as e:
+                if e.code == 401:
+                    logger.debug('Unauthorized, trying to login again...')
+
+                    self.oauth_session_expires = None
+
+                    if os.path.exists('.vaillant_auth.pickle'):
+                        os.remove('.vaillant_auth.pickle')
+
+                    await self.login()
+
+                    if self.oauth_session_expires:
+                        return await self.get_control_identifier(system)
+                else:
+                    logger.error('Failed to call HTTP endpoint: %s', e)
+                    raise
 
         return ControlIdentifier(control_identifier)
 
-    async def get_time_zone(self, system: System | str) -> datetime.tzinfo | None:
+    # async def get_time_zone(self, system: System | str) -> datetime.tzinfo | None:
+    def get_time_zone(self) -> datetime.tzinfo | None:
         """
         Gets the configured timezone for a system
 
         Parameters:
             system: The System object or system ID string
         """
-        url = (
-            f"{await self.get_api_base()}/systems/"
-            f"{get_system_id(system)}/meta-info/time-zone"
-        )
-        response = await self.aiohttp_session.get(
-            url,
-            headers=self.get_authorized_headers(),
-        )
-        try:
-            tz = (await response.json())["timeZone"]
-            return gettz(tz)
-        except KeyError:
-            logger.warning("Couldn't get timezone from API")
-            return None
+        return gettz('Europe/Warsaw')
+
+        # url = (
+        #     f"{await self.get_api_base()}/systems/"
+        #     f"{get_system_id(system)}/meta-info/time-zone"
+        # )
+        # response = await self.aiohttp_session.get(
+        #     url,
+        #     headers=self.get_authorized_headers(),
+        # )
+        # try:
+        #     tz = (await response.json())["timeZone"]
+        #     return gettz(tz)
+        # except KeyError:
+        #     logger.warning("Couldn't get timezone from API")
+        #     return None
 
     async def get_diagnostic_trouble_codes(
         self, system: System | str
@@ -1104,7 +1171,8 @@ class MyPyllantAPI:
                 headers=self.get_authorized_headers(),
             )
         except ClientResponseError as e:
-            logger.warning("Could not get diagnostic trouble codes", exc_info=e)
+            logger.warning(
+                "Could not get diagnostic trouble codes", exc_info=e)
             return None
         result = await response.json()
         return dict_to_snake_case(result)
@@ -1161,7 +1229,8 @@ class MyPyllantAPI:
                 headers=self.get_authorized_headers(),
             )
         except ClientResponseError as e:
-            logger.warning("Could not get ambisense capability data", exc_info=e)
+            logger.warning(
+                "Could not get ambisense capability data", exc_info=e)
             return False
         result = await response.json()
         return dict_to_snake_case(result).get("rbr_capable", False)

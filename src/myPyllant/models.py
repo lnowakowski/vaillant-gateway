@@ -179,7 +179,7 @@ class BaseTimeProgram(MyPyllantDataClass):
             day_list.sort(key=lambda x: x.start_time)
             # Create non-overlapping BaseTimeProgramDays
             for i, day in enumerate(day_list):
-                other_slots = day_list[i + 1 :]
+                other_slots = day_list[i + 1:]
                 for other_slot in other_slots:
                     if (
                         day.end_time > other_slot.start_time
@@ -215,7 +215,8 @@ class BaseTimeProgram(MyPyllantDataClass):
     def from_api(cls, **data):
         for weekday_name in [w for w in cls.weekday_names()]:
             data[weekday_name] = [
-                cls.create_day_from_api(index=i, weekday_name=weekday_name, **d)
+                cls.create_day_from_api(
+                    index=i, weekday_name=weekday_name, **d)
                 for i, d in enumerate(data.get(weekday_name, []))
             ]
         return super().from_api(**data)
@@ -385,7 +386,8 @@ class Zone(MyPyllantDataClass):
             control_identifier=data["control_identifier"], **data["heating"]
         )
         data["cooling"] = (
-            ZoneCooling.from_api(**data["cooling"]) if "cooling" in data else None
+            ZoneCooling.from_api(
+                **data["cooling"]) if "cooling" in data else None
         )
         data["general"] = ZoneGeneral.from_api(
             timezone=data["timezone"], **data["general"]
@@ -416,7 +418,8 @@ class Zone(MyPyllantDataClass):
     @property
     def quick_veto_remaining(self) -> datetime.timedelta | None:
         return (
-            self.quick_veto_end_date_time - datetime.datetime.now(self.timezone)
+            self.quick_veto_end_date_time -
+            datetime.datetime.now(self.timezone)
             if self.quick_veto_end_date_time and self.quick_veto_ongoing
             else None
         )
@@ -503,7 +506,8 @@ class DomesticHotWater(MyPyllantDataClass):
 
     @classmethod
     def from_api(cls, **data):
-        data["time_program_dhw"] = DHWTimeProgram.from_api(**data["time_program_dhw"])
+        data["time_program_dhw"] = DHWTimeProgram.from_api(
+            **data["time_program_dhw"])
         data["time_program_circulation_pump"] = DHWTimeProgram.from_api(
             **data["time_program_circulation_pump"]
         )
@@ -519,7 +523,8 @@ class DomesticHotWater(MyPyllantDataClass):
             data["current_special_function"] = DHWCurrentSpecialFunction(
                 data["current_special_function"]
             )
-            data["operation_mode_dhw"] = DHWOperationMode(data["operation_mode_dhw"])
+            data["operation_mode_dhw"] = DHWOperationMode(
+                data["operation_mode_dhw"])
         return super().from_api(**data)
 
 
@@ -622,7 +627,8 @@ class Device(MyPyllantDataClass):
     @property
     def operation_time(self) -> int | None:
         return (
-            self.rts_statistics.get("operation_time") if self.rts_statistics else None
+            self.rts_statistics.get(
+                "operation_time") if self.rts_statistics else None
         )
 
     @property
@@ -744,7 +750,6 @@ class System(MyPyllantDataClass):
     id: str
     state: dict
     configuration: dict
-    home: Home
     brand: str
     timezone: datetime.tzinfo
     control_identifier: ControlIdentifier
@@ -780,7 +785,8 @@ class System(MyPyllantDataClass):
             for z in system.merge_object("zones")
         ]
         system.circuits = [
-            Circuit.from_api(system_id=system.id, timezone=system.timezone, **c)
+            Circuit.from_api(system_id=system.id,
+                             timezone=system.timezone, **c)
             for c in system.merge_object("circuits")
         ]
         system.domestic_hot_water = [
@@ -793,7 +799,8 @@ class System(MyPyllantDataClass):
             for d in system.merge_object("dhw")
         ]
         system.ventilation = [
-            Ventilation.from_api(system_id=system.id, timezone=system.timezone, **d)
+            Ventilation.from_api(system_id=system.id,
+                                 timezone=system.timezone, **d)
             for d in system.merge_object("ventilation")
         ]
         system.devices = [
@@ -818,7 +825,8 @@ class System(MyPyllantDataClass):
         device["diagnostic_trouble_codes"] = dtc
 
     def apply_rts(self, device):
-        rts_statistics = self.rts_statistics_by_device_uuid(device["device_uuid"])
+        rts_statistics = self.rts_statistics_by_device_uuid(
+            device["device_uuid"])
         if rts_statistics:
             device["rts_statistics"] = rts_statistics
 
@@ -845,7 +853,8 @@ class System(MyPyllantDataClass):
 
     @property
     def primary_heat_generator(self) -> Device | None:
-        devices = [d for d in self.devices if d.type == "primary_heat_generator"]
+        devices = [d for d in self.devices if d.type ==
+                   "primary_heat_generator"]
         if len(devices) > 0:
             return devices[0]
         return None
@@ -904,7 +913,8 @@ class System(MyPyllantDataClass):
         try:
             return self.state["system"]["system_water_pressure"]
         except KeyError:
-            logger.debug("Could not get water pressure from system control state")
+            logger.debug(
+                "Could not get water pressure from system control state")
             return None
 
     @property
@@ -990,7 +1000,8 @@ class System(MyPyllantDataClass):
     def mpc_by_device_uuid(self, device_uuid: str) -> dict | None:
         if not self.mpc:
             return None
-        mpc = [m for m in self.mpc.get("devices", []) if m["device_id"] == device_uuid]
+        mpc = [m for m in self.mpc.get(
+            "devices", []) if m["device_id"] == device_uuid]
         return mpc[0] if mpc else None
 
 
