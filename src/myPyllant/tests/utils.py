@@ -74,7 +74,7 @@ def _mypyllant_aioresponses():
             )
             # API endpoints
             actions = re.compile(
-                r".*(away-mode|setBackTemperature|temperature|holiday)$"
+                r".*(away-mode|setBackTemperature|temperature|holiday|cooling-for-days|ventilation-boost)$"
             )
             self.post(
                 actions,
@@ -120,7 +120,7 @@ def _mypyllant_aioresponses():
             )
             self.post(
                 re.compile(
-                    r".*zones?/.*/(quick-veto|manual-mode-setpoint|heating-operation-mode|heating/operation-mode)$"
+                    r".*zones?/.*/(quick-veto|manual-mode-setpoint|heating-operation-mode|operation-mode|setpoint-cooling)$"
                 ),
                 status=200,
                 payload={},
@@ -128,7 +128,7 @@ def _mypyllant_aioresponses():
             )
             self.patch(
                 re.compile(
-                    r".*zones?/.*/(quick-veto|manual-mode-setpoint|heating-operation-mode|heating/operation-mode)$"
+                    r".*zones?/.*/(quick-veto|manual-mode-setpoint|heating-operation-mode|operation-mode|setpoint-cooling)$"
                 ),
                 status=200,
                 payload={},
@@ -150,6 +150,12 @@ def _mypyllant_aioresponses():
                 re.compile(
                     r".*/ambisense/.*/rooms/.*/configuration/(operation-mode|quick-veto|temperature-setpoint)$"
                 ),
+                status=200,
+                payload={},
+                repeat=True,
+            )
+            self.put(
+                re.compile(r".*/ambisense/.*/rooms/.*/timeprogram$"),
                 status=200,
                 payload={},
                 repeat=True,
@@ -241,6 +247,21 @@ def _mypyllant_aioresponses():
                         repeat=True,
                     )
             self.get(
+                re.compile(r".*"),
+                callback=unmatched_url,
+                repeat=True,
+            )
+            self.patch(
+                re.compile(r".*"),
+                callback=unmatched_url,
+                repeat=True,
+            )
+            self.post(
+                re.compile(r".*"),
+                callback=unmatched_url,
+                repeat=True,
+            )
+            self.delete(
                 re.compile(r".*"),
                 callback=unmatched_url,
                 repeat=True,

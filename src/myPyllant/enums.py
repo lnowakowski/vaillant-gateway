@@ -46,13 +46,13 @@ class DeviceDataBucketResolution(MyPyllantEnum):
     MONTH = "MONTH"
 
 
-class ZoneHeatingOperatingMode(MyPyllantEnum):
+class ZoneOperatingMode(MyPyllantEnum):
     MANUAL = "MANUAL"
     TIME_CONTROLLED = "TIME_CONTROLLED"
     OFF = "OFF"
 
 
-class ZoneHeatingOperatingModeVRC700(MyPyllantEnum):
+class ZoneOperatingModeVRC700(MyPyllantEnum):
     DAY = "DAY"
     AUTO = "AUTO"
     SET_BACK = "SET_BACK"
@@ -65,6 +65,7 @@ class ZoneCurrentSpecialFunction(MyPyllantEnum):
     HOLIDAY = "HOLIDAY"
     SYSTEM_OFF = "SYSTEM_OFF"
     VENTILATION_BOOST = "VENTILATION_BOOST"
+    ONE_DAY_BANK_HOLIDAY = "ONE_DAY_BANK_HOLIDAY"
 
 
 class ZoneHeatingState(MyPyllantEnum):
@@ -73,19 +74,22 @@ class ZoneHeatingState(MyPyllantEnum):
     COOLING_DOWN = "COOLING_DOWN"
 
 
-class ZoneTimeProgramType(MyPyllantEnum):
+class ZoneOperatingType(MyPyllantEnum):
     HEATING = "heating"
     COOLING = "cooling"
 
 
 class DHWCurrentSpecialFunction(MyPyllantEnum):
     CYLINDER_BOOST = "CYLINDER_BOOST"
+    HOLIDAY = "HOLIDAY"
     REGULAR = "REGULAR"
 
 
 class DHWCurrentSpecialFunctionVRC700(MyPyllantEnum):
     CYLINDER_BOOST = "CYLINDER_BOOST"
     HOLIDAY = "HOLIDAY"
+    BANK_HOLIDAY = "BANK_HOLIDAY"
+    ONE_DAY_BANK_HOLIDAY = "ONE_DAY_BANK_HOLIDAY"
     NONE = "NONE"
 
 
@@ -106,6 +110,19 @@ class VentilationOperationMode(MyPyllantEnum):
     REDUCED = "REDUCED"
     TIME_CONTROLLED = "TIME_CONTROLLED"
     OFF = "OFF"
+
+
+class VentilationOperationModeVRC700(MyPyllantEnum):
+    """
+    TODO: Other than AUTO, these are just guesses
+    """
+
+    DAY = "DAY"
+    AUTO = "AUTO"
+    SET_BACK = "SET_BACK"
+    OFF = "OFF"
+    NORMAL = "NORMAL"
+    REDUCED = "REDUCED"
 
 
 class VentilationFanStageType(MyPyllantEnum):

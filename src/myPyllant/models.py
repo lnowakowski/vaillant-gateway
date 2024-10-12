@@ -5,24 +5,26 @@ import datetime
 import logging
 from collections.abc import Iterator
 from dataclasses import asdict, fields, field
-from typing import TypeVar, Any
+from typing import TypeVar, Any, Iterable
 from pydantic.dataclasses import dataclass
 
 from myPyllant.const import BRANDS
 from myPyllant.enums import (
     CircuitState,
     DeviceDataBucketResolution,
-    ZoneHeatingOperatingMode,
+    ZoneOperatingMode,
     ZoneCurrentSpecialFunction,
     ZoneHeatingState,
     DHWCurrentSpecialFunction,
     DHWOperationMode,
     VentilationOperationMode,
     ControlIdentifier,
-    ZoneHeatingOperatingModeVRC700,
+    ZoneOperatingModeVRC700,
     DHWCurrentSpecialFunctionVRC700,
     DHWOperationModeVRC700,
     AmbisenseRoomOperationMode,
+    VentilationOperationModeVRC700,
+    ZoneOperatingType,
 )
 from myPyllant.utils import datetime_parse, prepare_field_value_for_dict
 
@@ -55,7 +57,9 @@ class MyPyllantDataClass:
         dataclass_fields = fields(cls)
         extra_fields = set(data.keys()) - {f.name for f in dataclass_fields}
         datetime_fields = set(
-            f.name for f in dataclass_fields if f.type == "datetime.datetime"
+            f.name
+            for f in dataclass_fields
+            if "datetime.datetime" in str(f.type)  # TODO: Use typing.get_origin()
         )
         timezone: datetime.tzinfo | None = data.get("timezone")
 
@@ -65,8 +69,13 @@ class MyPyllantDataClass:
             )
 
         for k, v in data.items():
-            if k in datetime_fields and timezone is not None:
-                data[k] = datetime_parse(v, timezone)
+            if v is not None and k in datetime_fields and timezone is not None:
+                if v.endswith("Z"):
+                    # Some dates are returned as "2024-01-01T00:00:00Z" without timezone information
+                    data[k] = datetime_parse(v, timezone)
+                else:
+                    # ... and some are ISO formatted with timezone information
+                    data[k] = datetime.datetime.fromisoformat(v)
 
         if extra_fields:
             data["extra_fields"] = {f: data[f] for f in extra_fields}
@@ -116,7 +125,8 @@ class BaseTimeProgramDay(MyPyllantDataClass):
 
     @property
     def end_datetime_time(self) -> datetime.time:
-        return datetime.time(self.end_time // 60, self.end_time % 60)
+        end_time = self.end_time % 1440
+        return datetime.time(end_time // 60, end_time % 60)
 
     def start_datetime(self, date) -> datetime.datetime:
         return date.replace(
@@ -127,17 +137,19 @@ class BaseTimeProgramDay(MyPyllantDataClass):
         )
 
     def end_datetime(self, date) -> datetime.datetime:
-        if self.end_time == 1440:
-            return date.replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ) + datetime.timedelta(days=1)
-        else:
-            return date.replace(
-                hour=self.end_time // 60,
-                minute=self.end_time % 60,
-                second=0,
-                microsecond=0,
-            )
+        """
+        end_time can be > 1440 for RoomTimeProgramDay, which indicates the time slot ends on a later day
+
+        On all other time programs, end_time is <= 1440. Exactly 1440 is returned as midnight on the next day.
+        """
+        days = self.end_time // 1440
+        end_time = self.end_time % 1440
+        return date.replace(
+            hour=end_time // 60,
+            minute=end_time % 60,
+            second=0,
+            microsecond=0,
+        ) + datetime.timedelta(days=days)
 
 
 @dataclass(config=MyPyllantConfig)
@@ -276,7 +288,7 @@ class ZoneTimeProgram(BaseTimeProgram):
 @dataclass(config=MyPyllantConfig)
 class ZoneHeating(MyPyllantDataClass):
     control_identifier: ControlIdentifier
-    operation_mode_heating: ZoneHeatingOperatingMode | ZoneHeatingOperatingModeVRC700
+    operation_mode_heating: ZoneOperatingMode | ZoneOperatingModeVRC700
     set_back_temperature: float
     time_program_heating: ZoneTimeProgram | None = None
     manual_mode_setpoint_heating: float | None = None
@@ -290,11 +302,11 @@ class ZoneHeating(MyPyllantDataClass):
             )
         control_identifier: ControlIdentifier = data["control_identifier"]
         if control_identifier.is_vrc700:
-            data["operation_mode_heating"] = ZoneHeatingOperatingModeVRC700(
+            data["operation_mode_heating"] = ZoneOperatingModeVRC700(
                 data["operation_mode_heating"]
             )
         else:
-            data["operation_mode_heating"] = ZoneHeatingOperatingMode(
+            data["operation_mode_heating"] = ZoneOperatingMode(
                 data["operation_mode_heating"]
             )
 
@@ -303,8 +315,9 @@ class ZoneHeating(MyPyllantDataClass):
 
 @dataclass(config=MyPyllantConfig)
 class ZoneCooling(MyPyllantDataClass):
+    control_identifier: ControlIdentifier
     setpoint_cooling: float
-    operation_mode_cooling: str  # TODO: Need all values
+    operation_mode_cooling: ZoneOperatingMode | ZoneOperatingModeVRC700
     time_program_cooling: ZoneTimeProgram
     manual_mode_setpoint_cooling: float | None = None
 
@@ -313,6 +326,16 @@ class ZoneCooling(MyPyllantDataClass):
         data["time_program_cooling"] = ZoneTimeProgram.from_api(
             **data["time_program_cooling"]
         )
+        control_identifier: ControlIdentifier = data["control_identifier"]
+        if control_identifier.is_vrc700:
+            data["operation_mode_cooling"] = ZoneOperatingModeVRC700(
+                data["operation_mode_cooling"]
+            )
+        else:
+            data["operation_mode_cooling"] = ZoneOperatingMode(
+                data["operation_mode_cooling"]
+            )
+
         return super().from_api(**data)
 
 
@@ -358,6 +381,23 @@ class ZoneGeneral(MyPyllantDataClass):
 
 
 @dataclass(config=MyPyllantConfig)
+class Circuit(MyPyllantDataClass):
+    system_id: str
+    index: int
+    circuit_state: CircuitState
+    mixer_circuit_type_external: str | None = None
+    set_back_mode_enabled: bool | None = None
+    zones: list = field(default_factory=list)
+    is_cooling_allowed: bool | None = None
+    current_circuit_flow_temperature: float | None = None
+    heating_curve: float | None = None
+    heating_flow_temperature_minimum_setpoint: float | None = None
+    heating_flow_temperature_maximum_setpoint: float | None = None
+    min_flow_temperature_setpoint: float | None = None
+    calculated_energy_manager_state: str | None = None
+
+
+@dataclass(config=MyPyllantConfig)
 class Zone(MyPyllantDataClass):
     system_id: str
     general: ZoneGeneral
@@ -370,36 +410,48 @@ class Zone(MyPyllantDataClass):
     is_active: bool | None = None
     heating_state: ZoneHeatingState | None = None
     is_cooling_allowed: bool | None = None
+    is_manual_cooling_active: bool | None = None
     cooling: ZoneCooling | None = None
     current_room_temperature: float | None = None
     desired_room_temperature_setpoint_heating: float | None = None
     desired_room_temperature_setpoint_cooling: float | None = None
     desired_room_temperature_setpoint: float | None = None
     current_room_humidity: float | None = None
+    associated_circuit: Circuit | None = None
     associated_circuit_index: int | None = None
     quick_veto_start_date_time: datetime.datetime | None = None
     quick_veto_end_date_time: datetime.datetime | None = None
 
     @classmethod
-    def from_api(cls, **data):
+    def from_api(cls, circuits: list[Circuit] | None = None, **data):
         data["heating"] = ZoneHeating.from_api(
             control_identifier=data["control_identifier"], **data["heating"]
         )
-        data["cooling"] = (
-            ZoneCooling.from_api(
-                **data["cooling"]) if "cooling" in data else None
-        )
+        if "cooling" in data:
+            if not data["cooling"]:
+                # cooling might be set as an empty dict
+                data["cooling"] = None
+            else:
+                data["cooling"] = ZoneCooling.from_api(
+                    control_identifier=data["control_identifier"], **data["cooling"]
+                )
         data["general"] = ZoneGeneral.from_api(
             timezone=data["timezone"], **data["general"]
         )
+        if circuits:
+            data["associated_circuit"] = next(
+                c for c in circuits if c.index == data["associated_circuit_index"]
+            )
         return super().from_api(**data)
 
-    def get_associated_circuit(self, system: System):
-        if self.associated_circuit_index in [c.index for c in system.circuits]:
-            return next(
-                c for c in system.circuits if c.index == self.associated_circuit_index
-            )
-        return None
+    @property
+    def is_cooling_allowed_circuit(self):
+        """
+        On VRC700, is_cooling_allowed is only set on the circuit
+        """
+        return self.is_cooling_allowed or (
+            self.associated_circuit and self.associated_circuit.is_cooling_allowed
+        )
 
     @property
     def name(self):
@@ -434,27 +486,41 @@ class Zone(MyPyllantDataClass):
 
     @property
     def is_auto_heating_mode(self) -> bool:
+        """
+        Whether the zone is in time-controlled heating mode
+        """
         return self.heating.operation_mode_heating in [
-            ZoneHeatingOperatingMode.TIME_CONTROLLED,
-            ZoneHeatingOperatingModeVRC700.AUTO,
+            ZoneOperatingMode.TIME_CONTROLLED,
+            ZoneOperatingModeVRC700.AUTO,
         ]
 
+    @property
+    def active_operating_type(self) -> str:
+        """
+        Whether the system is cooling or heating, based on the desired temperature
+        """
+        if (
+            self.desired_room_temperature_setpoint
+            == self.desired_room_temperature_setpoint_cooling
+        ):
+            return ZoneOperatingType.COOLING
+        else:
+            return ZoneOperatingType.HEATING
 
-@dataclass(config=MyPyllantConfig)
-class Circuit(MyPyllantDataClass):
-    system_id: str
-    index: int
-    circuit_state: CircuitState
-    mixer_circuit_type_external: str | None = None
-    set_back_mode_enabled: bool | None = None
-    zones: list = field(default_factory=list)
-    is_cooling_allowed: bool | None = None
-    current_circuit_flow_temperature: float | None = None
-    heating_curve: float | None = None
-    heating_flow_temperature_minimum_setpoint: float | None = None
-    heating_flow_temperature_maximum_setpoint: float | None = None
-    min_flow_temperature_setpoint: float | None = None
-    calculated_energy_manager_state: str | None = None
+    @property
+    def active_operation_mode(
+        self,
+    ) -> ZoneOperatingMode | ZoneOperatingModeVRC700 | None:
+        """
+        Returns the active operation mode, of the active operating type
+        """
+        operation: ZoneHeating | ZoneCooling | None = getattr(
+            self, self.active_operating_type
+        )
+        if operation:
+            return getattr(operation, f"operation_mode_{self.active_operating_type}")
+        else:
+            return None
 
 
 @dataclass(config=MyPyllantConfig)
@@ -532,10 +598,25 @@ class DomesticHotWater(MyPyllantDataClass):
 class Ventilation(MyPyllantDataClass):
     system_id: str
     index: int
+    control_identifier: ControlIdentifier
     maximum_day_fan_stage: int
     maximum_night_fan_stage: int
-    operation_mode_ventilation: VentilationOperationMode
+    operation_mode_ventilation: VentilationOperationMode | VentilationOperationModeVRC700
     time_program_ventilation: dict
+
+    @classmethod
+    def from_api(cls, **data):
+        control_identifier: ControlIdentifier = data["control_identifier"]
+        if control_identifier.is_vrc700:
+            data["operation_mode_ventilation"] = VentilationOperationModeVRC700(
+                data["operation_mode_ventilation"]
+            )
+        else:
+            data["operation_mode_ventilation"] = VentilationOperationMode(
+                data["operation_mode_ventilation"]
+            )
+
+        return super().from_api(**data)
 
 
 @dataclass(config=MyPyllantConfig)
@@ -557,7 +638,19 @@ class DeviceData(MyPyllantDataClass):
     energy_type: str | None = None
     value_type: str | None = None
     calculated: bool | None = None
+    total_consumption: float | None = None
     data: list[DeviceDataBucket] = field(default_factory=list)
+
+    @property
+    def total_consumption_rounded(self) -> float:
+        """
+        Rounds odd float values from the API to match the app, i.e. 8998.87 -> 9000 and 8499.99 -> 8500
+        """
+        return (
+            round(self.total_consumption / 1000, 1) * 1000
+            if self.total_consumption
+            else 0.0
+        )
 
     @classmethod
     def from_api(cls, **data):
@@ -648,10 +741,7 @@ class Device(MyPyllantDataClass):
 
 
 @dataclass(config=MyPyllantConfig)
-class RoomTimeProgramDay(MyPyllantDataClass):
-    index: int
-    weekday_name: str
-    start_time: int
+class RoomTimeProgramDay(BaseTimeProgramDay):
     temperature_setpoint: float | None = None
 
     @property
@@ -689,27 +779,102 @@ class RoomTimeProgram(BaseTimeProgram):
     sunday: list[RoomTimeProgramDay]
 
     @classmethod
+    def dict_factory(cls, obj: Iterable[tuple[str, Any]]) -> dict[str, Any]:
+        """
+        Only includes certain fields when converting to dict with asdict()
+        See https://stackoverflow.com/a/76017464
+
+        Example::
+
+            asdict(time_program, dict_factory=RoomTimeProgram.dict_factory)
+        """
+        include_fields = cls.weekday_names() + ["temperature_setpoint", "start_time"]
+        return {k: v for (k, v) in obj if ((v is not None) and (k in include_fields))}
+
+    @classmethod
+    def from_api(cls, **data) -> RoomTimeProgram:
+        """
+        Unlike the other time programs, the Ambisense room time program does not have an end_time.
+        Instead, the end_time is the start_time of the next slot.
+
+        It takes this: {"monday": [{"start_time": 360, "temperature_setpoint": 21.0}, {"start_time": 480, "temperature_setpoint": 22.0}]}
+        ...and converts it to this: {"monday": [RoomTimeProgramDay(start_time=360, end_time=480, temperature_setpoint=21.0), RoomTimeProgramDay(start_time=480, end_time=10440, temperature_setpoint=22.0)]}
+
+        In RoomTimeProgramDay, end_time can be greater than 1440 (24h), if it ends on a later day.
+        """
+
+        # Keep a copy of the original data, because we need to traverse it to find the next time slot,
+        # but we want to overwrite the weekdays with RoomTimeProgramDay instances
+        orig_data = data.copy()
+        for weekday_index, weekday_name in enumerate(cls.weekday_names()):
+            weekday_slots = data.pop(weekday_name, [])
+            # Make sure slots are sorted ascending by start time, so the next slot is always later
+            sorted(weekday_slots, key=lambda x: x["start_time"])
+            data[weekday_name] = []
+            for slot_index, weekday_slot in enumerate(weekday_slots):
+                if "end_time" in weekday_slot:
+                    raise ValueError(
+                        "Ambisense room time program does not allow setting end_time"
+                    )
+                if len(weekday_slots) > slot_index + 1:
+                    # If there is another slot on the same day, use its start_time as the end_time
+                    end_time = weekday_slots[slot_index + 1]["start_time"]
+                else:
+                    end_time = None
+                    i = 0
+                    # Iterate over weekdays until we find one with a time program slot
+                    while not end_time:
+                        i += 1
+                        next_weekday_index = (weekday_index + i) % 7
+                        next_day = orig_data.get(
+                            cls.weekday_names()[next_weekday_index], []
+                        )
+                        if next_day:
+                            # 24h == 1440min
+                            end_time = (i * 1440) + next_day[0]["start_time"]
+                        elif i == 7:
+                            raise ValueError(
+                                "Could not find end_time for time program %s"
+                                % weekday_slot
+                            )
+
+                data[weekday_name].append(
+                    cls.create_day_from_api(
+                        index=slot_index,
+                        end_time=end_time,
+                        weekday_name=weekday_name,
+                        **weekday_slot,
+                    )
+                )
+        # Skip from_api of BaseTimeProgram, because we already did the conversion to TimeProgramDay
+        return super(BaseTimeProgram, cls).from_api(**data)
+
+    @classmethod
     def create_day_from_api(cls, **kwargs):
+        if "setpoint" in kwargs:
+            # Allow setpoint as well as temperature_setpoint, for consistency with the other classes
+            kwargs["temperature_setpoint"] = kwargs.pop("setpoint")
         return RoomTimeProgramDay(**kwargs)
 
 
 @dataclass(config=MyPyllantConfig)
 class AmbisenseDevice(MyPyllantDataClass):
     device_type: str
-    low_bat: bool
     name: str
-    rssi: int
     sgtin: str
-    unreach: bool
+    unreach: bool | None = None
+    low_bat: bool | None = None
+    rssi: int | None = None
     rssi_peer: int | None = None
 
 
 @dataclass(config=MyPyllantConfig)
 class AmbisenseRoomConfiguration(MyPyllantDataClass):
     name: str
-    operation_mode: AmbisenseRoomOperationMode
-    current_temperature: float
-    temperature_setpoint: float
+    timezone: datetime.tzinfo
+    operation_mode: AmbisenseRoomOperationMode | None = None
+    current_temperature: float | None = None
+    temperature_setpoint: float | None = None
     icon_id: str | None = None
     current_humidity: float | None = None
     button_lock: bool | None = None
@@ -719,9 +884,10 @@ class AmbisenseRoomConfiguration(MyPyllantDataClass):
 
     @classmethod
     def from_api(cls, **data):
-        data["operation_mode"] = AmbisenseRoomOperationMode(
-            data["operation_mode"].upper()
-        )
+        if data["operation_mode"]:
+            data["operation_mode"] = AmbisenseRoomOperationMode(
+                data["operation_mode"].upper()
+            )
         return super().from_api(**data)
 
 
@@ -738,9 +904,10 @@ class AmbisenseRoom(MyPyllantDataClass):
 
     @classmethod
     def from_api(cls, **data):
+        timezone = data.pop("timezone")
         data["time_program"] = RoomTimeProgram.from_api(**data["time_program"])
         data["room_configuration"] = AmbisenseRoomConfiguration.from_api(
-            **data["room_configuration"]
+            timezone=timezone, **data["room_configuration"]
         )
         return super().from_api(**data)
 
@@ -764,6 +931,8 @@ class System(MyPyllantDataClass):
     devices: list[Device] = field(default_factory=list)
     mpc: dict | None = None
     rts: dict | None = None
+    energy_management: dict | None = None
+    eebus: dict | None = None
     ambisense_capability: bool = False
     ambisense_rooms: list[AmbisenseRoom] = field(default_factory=list)
 
@@ -775,19 +944,19 @@ class System(MyPyllantDataClass):
         system: System = super().from_api(**data)
         logger.debug(f"Creating related models from state: {data}")
         system.extra_fields = system.merge_extra_fields()
+        system.circuits = [
+            Circuit.from_api(system_id=system.id, timezone=system.timezone, **c)
+            for c in system.merge_object("circuits")
+        ]
         system.zones = [
             Zone.from_api(
                 system_id=system.id,
                 timezone=system.timezone,
                 control_identifier=system.control_identifier,
+                circuits=system.circuits,
                 **z,
             )
             for z in system.merge_object("zones")
-        ]
-        system.circuits = [
-            Circuit.from_api(system_id=system.id,
-                             timezone=system.timezone, **c)
-            for c in system.merge_object("circuits")
         ]
         system.domestic_hot_water = [
             DomesticHotWater.from_api(
@@ -798,10 +967,19 @@ class System(MyPyllantDataClass):
             )
             for d in system.merge_object("dhw")
         ]
+        # TODO: Is it called ventilations everywhere, or just on VRC700 controllers?
+        if "ventilations" in system.configuration:
+            ventilation_key = "ventilations"
+        else:
+            ventilation_key = "ventilation"
         system.ventilation = [
-            Ventilation.from_api(system_id=system.id,
-                                 timezone=system.timezone, **d)
-            for d in system.merge_object("ventilation")
+            Ventilation.from_api(
+                system_id=system.id,
+                control_identifier=system.control_identifier,
+                timezone=system.timezone,
+                **d,
+            )
+            for d in system.merge_object(ventilation_key)
         ]
         system.devices = [
             Device.from_api(
@@ -814,7 +992,8 @@ class System(MyPyllantDataClass):
             for k, v in system.raw_devices
         ]
         system.ambisense_rooms = [
-            AmbisenseRoom.from_api(system_id=system.id, **r) for r in ambisense_rooms
+            AmbisenseRoom.from_api(system_id=system.id, timezone=system.timezone, **r)
+            for r in ambisense_rooms
         ]
         return system
 
@@ -885,14 +1064,14 @@ class System(MyPyllantDataClass):
                     c for c in self.state.get(obj_name, []) if c["index"] == idx
                 )
             except (StopIteration, KeyError) as e:
-                logger.warning("Error when merging state", exc_info=e)
+                logger.debug("Error when merging state", exc_info=e)
                 state = {}
             try:
                 properties = next(
                     c for c in self.properties.get(obj_name, []) if c["index"] == idx
                 )
             except (StopIteration, KeyError) as e:
-                logger.warning("Error when merging properties", exc_info=e)
+                logger.debug("Error when merging properties", exc_info=e)
                 properties = {}
             configuration.update(state)
             configuration.update(properties)
@@ -905,6 +1084,16 @@ class System(MyPyllantDataClass):
         except KeyError:
             logger.debug(
                 "Could not get outdoor temperature from system control state",
+            )
+            return None
+
+    @property
+    def outdoor_temperature_average_24h(self) -> float | None:
+        try:
+            return self.state["system"]["outdoor_temperature_average_24h"]
+        except KeyError:
+            logger.debug(
+                "Could not get outdoor temperature average 24h from system control state",
             )
             return None
 
@@ -958,6 +1147,47 @@ class System(MyPyllantDataClass):
             return None
 
     @property
+    def is_cooling_allowed(self) -> bool:
+        return any([z.is_cooling_allowed for z in self.zones]) or any(
+            [c.is_cooling_allowed for c in self.circuits]
+        )
+
+    @property
+    def manual_cooling_start_date(self) -> datetime.datetime | None:
+        manual_cooling_start_date = self.configuration.get("system", {}).get(
+            "manual_cooling_start_date"
+        )
+        if manual_cooling_start_date:
+            return datetime_parse(
+                manual_cooling_start_date,
+                self.timezone,
+            )
+        return None
+
+    @property
+    def manual_cooling_end_date(self) -> datetime.datetime | None:
+        manual_cooling_end_date = self.configuration.get("system", {}).get(
+            "manual_cooling_end_date"
+        )
+        if manual_cooling_end_date:
+            return datetime_parse(
+                manual_cooling_end_date,
+                self.timezone,
+            )
+        return None
+
+    @property
+    def manual_cooling_days(self) -> int | None:
+        if self.control_identifier.is_vrc700:
+            return self.configuration.get("system", {}).get("cooling_for_x_days")
+        elif self.manual_cooling_end_date:
+            return (
+                self.manual_cooling_end_date - datetime.datetime.now(self.timezone)
+            ).days
+        else:
+            return None
+
+    @property
     def system_name(self) -> str:
         if self.primary_heat_generator:
             return self.primary_heat_generator.product_name_display
@@ -1003,6 +1233,39 @@ class System(MyPyllantDataClass):
         mpc = [m for m in self.mpc.get(
             "devices", []) if m["device_id"] == device_uuid]
         return mpc[0] if mpc else None
+
+    @property
+    def manual_cooling_planned(self) -> bool:
+        return (
+            self.manual_cooling_start_date is not None
+            and self.manual_cooling_end_date is not None
+            and self.manual_cooling_end_date > datetime.datetime.now(self.timezone)
+        )
+
+    @property
+    def manual_cooling_start_in_future(self) -> bool:
+        return (
+            self.manual_cooling_start_date is not None
+            and self.manual_cooling_start_date > datetime.datetime.now(self.timezone)
+        )
+
+    @property
+    def manual_cooling_ongoing(self) -> bool:
+        return (
+            self.manual_cooling_start_date is not None
+            and self.manual_cooling_end_date is not None
+            and self.manual_cooling_start_date
+            < datetime.datetime.now(self.timezone)
+            < self.manual_cooling_end_date
+        )
+
+    @property
+    def manual_cooling_remaining(self) -> datetime.timedelta | None:
+        return (
+            self.manual_cooling_end_date - datetime.datetime.now(self.timezone)
+            if self.manual_cooling_end_date and self.manual_cooling_ongoing
+            else None
+        )
 
 
 @dataclass(config=MyPyllantConfig)
