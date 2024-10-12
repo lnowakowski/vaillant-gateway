@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 import aiohttp
-from aiohttp import ClientResponse, ClientResponseError
+from aiohttp import ClientResponse, ClientResponseError, hdrs
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,22 @@ async def on_request_start(session, context, params: aiohttp.TraceRequestStartPa
     """
     See https://docs.aiohttp.org/en/stable/tracing_reference.html#aiohttp.TraceConfig.on_request_start
     """
-    logger.debug("Starting request %s", params)
+    logger.debug("Starting %s to %s", params.method, params.url)
+
+
+async def on_request_chunk_sent(
+    session, context, params: aiohttp.TraceRequestChunkSentParams
+):
+    """
+    See https://docs.aiohttp.org/en/stable/tracing_reference.html#aiohttp.TraceConfig.on_request_chunk_sent
+    """
+    if params.chunk:
+        logger.debug(
+            "Sending %s to %s with %s",
+            params.method,
+            params.url,
+            params.chunk,
+        )
 
 
 async def on_request_end(session, context, params: aiohttp.TraceRequestEndParams):
@@ -32,8 +47,16 @@ async def on_request_end(session, context, params: aiohttp.TraceRequestEndParams
     See https://docs.aiohttp.org/en/stable/tracing_reference.html#aiohttp.TraceConfig.on_request_end
     and https://docs.python.org/3/howto/logging.html#optimization
     """
-    if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("Got response %s", await params.response.text())
+    if params.headers.get(hdrs.CONTENT_TYPE, "").lower() == "application/json":
+        content = await params.response.json()
+    else:
+        content = await params.response.text()
+    logger.debug(
+        "Got response for %s to %s: %s",
+        params.method,
+        params.url,
+        content,
+    )
 
 
 async def on_raise_for_status(response: ClientResponse):
@@ -51,14 +74,18 @@ async def on_raise_for_status(response: ClientResponse):
 
 
 def get_http_client(**kwargs) -> aiohttp.ClientSession:
-    trace_config = aiohttp.TraceConfig()
-    trace_config.on_request_start.append(on_request_start)
-    trace_config.on_request_end.append(on_request_end)
+    trace_configs: list[aiohttp.TraceConfig] | None = None
+    if logger.isEnabledFor(logging.DEBUG):
+        trace_config = aiohttp.TraceConfig()
+        trace_config.on_request_start.append(on_request_start)
+        trace_config.on_request_end.append(on_request_end)
+        trace_config.on_request_chunk_sent.append(on_request_chunk_sent)
+        trace_configs = [trace_config]
 
     defaults = dict(
         cookie_jar=aiohttp.CookieJar(),
         raise_for_status=on_raise_for_status,  # type: ignore
-        trace_configs=[trace_config],
+        trace_configs=trace_configs,
     )
 
     return aiohttp.ClientSession(**{**defaults, **kwargs})
